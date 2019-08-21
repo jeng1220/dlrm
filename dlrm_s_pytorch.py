@@ -283,7 +283,7 @@ class DLRM_Net(nn.Module):
     def parallel_forward(self, dense_x, lS_o, lS_i):
         ### prepare model (overwrite) ###
         # WARNING: # of devices must be >= batch size in parallel_forward call
-        batch_size = dense_x.size()[0]
+        batch_size = lS_o[0].size()[0]
         ndevices = min(self.ndevices, batch_size, len(self.emb_l))
         device_ids = range(ndevices)
         # WARNING: must redistribute the model if mini-batch size changes(this is common
@@ -293,7 +293,8 @@ class DLRM_Net(nn.Module):
 
         if self.sync_dense_params or self.parallel_model_is_not_prepared:
             # replicate mlp (data parallelism)
-            self.bot_l_replicas = replicate(self.bot_l, device_ids)
+            if dense_x is not None:
+                self.bot_l_replicas = replicate(self.bot_l, device_ids)
             self.top_l_replicas = replicate(self.top_l, device_ids)
             # distribute embeddings (model parallelism)
             t_list = []
@@ -308,7 +309,8 @@ class DLRM_Net(nn.Module):
         ### prepare input (overwrite) ###
         # scatter dense features (data parallelism)
         # print(dense_x.device)
-        dense_x = scatter(dense_x, device_ids, dim=0)
+        if dense_x is not None:
+            dense_x = scatter(dense_x, device_ids, dim=0)
         # distribute sparse features (model parallelism)
         if (len(self.emb_l) != len(lS_o)) or (len(self.emb_l) != len(lS_i)):
             sys.exit("ERROR: corrupted model input detected in parallel_forward call")
@@ -329,7 +331,10 @@ class DLRM_Net(nn.Module):
         # inputs that has been scattered across devices on the first (batch) dimension.
         # The output is a list of tensors scattered across devices according to the
         # distribution of dense_x.
-        x = parallel_apply(self.bot_l_replicas, dense_x, None, device_ids)
+        if dense_x is not None:
+            x = parallel_apply(self.bot_l_replicas, dense_x, None, device_ids)
+        else:
+            x = [None for _ in range(ndevices)]
         # debug prints
         # print(x)
 
@@ -664,7 +669,7 @@ if __name__ == "__main__":
             # Custom Model-Data Parallel
             # the mlps are replicated and use data parallelism, while
             # the embeddings are distributed and use model parallelism
-            dlrm.ndevices = min(ngpus, args.mini_batch_size, num_fea - 1)
+            dlrm.ndevices = min(ngpus, args.mini_batch_size, num_fea if args.arch_without_mlp_bot else num_fea - 1)
         dlrm = dlrm.to(device)  # .cuda()
 
     # specify the loss function
