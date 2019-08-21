@@ -87,6 +87,7 @@ exc = getattr(builtins, "IOError", "FileNotFoundError")
 ### define dlrm in PyTorch ###
 class DLRM_Net(nn.Module):
     def create_mlp(self, ln, sigmoid_layer):
+        if ln[0] == 0: return None
         # build MLP layer by layer
         layers = nn.ModuleList()
         for i in range(0, ln.size - 1):
@@ -192,6 +193,7 @@ class DLRM_Net(nn.Module):
         #     x = layer(x)
         # return x
         # approach 2: use Sequential container to wrap all layers
+        if layers is None: return None
         return layers(x)
 
     def apply_emb(self, lS_o, lS_i, emb_l):
@@ -220,9 +222,10 @@ class DLRM_Net(nn.Module):
 
     def interact_features(self, x, ly):
         if self.arch_interaction_op == "dot":
+            F = ly if x is None else [x] + ly
             # concatenate dense and sparse features
-            (batch_size, d) = x.shape
-            T = torch.cat([x] + ly, dim=1).view((batch_size, -1, d))
+            (batch_size, d) = ly[0].shape
+            T = torch.cat(F, dim=1).view((batch_size, -1, d))
             # perform a dot product
             Z = torch.bmm(T, torch.transpose(T, 1, 2))
             # append dense feature with the interactions (into a row vector)
@@ -234,10 +237,11 @@ class DLRM_Net(nn.Module):
             li, lj = torch.tril_indices(ni, nj, offset=offset)
             Zflat = Z[:, li, lj]
             # concatenate dense features and interactions
-            R = torch.cat([x] + [Zflat], dim=1)
+            R = Zflat if x is None else torch.cat([x] + [Zflat], dim=1)
         elif self.arch_interaction_op == "cat":
             # concatenation features (into a row vector)
-            R = torch.cat([x] + ly, dim=1)
+            F = ly if x is None else [x] + ly
+            R = torch.cat(F, dim=1)
         else:
             sys.exit(
                 "ERROR: --arch-interaction-op="
@@ -399,6 +403,7 @@ if __name__ == "__main__":
     parser.add_argument("--arch-sparse-feature-size", type=int, default=2)
     parser.add_argument("--arch-embedding-size", type=str, default="4-3-2")
     # j will be replaced with the table number
+    parser.add_argument("--arch-without-mlp-bot", action="store_true", default=False)
     parser.add_argument("--arch-mlp-bot", type=str, default="4-3-2")
     parser.add_argument("--arch-mlp-top", type=str, default="4-2-1")
     parser.add_argument("--arch-interaction-op", type=str, default="dot")
@@ -538,6 +543,13 @@ if __name__ == "__main__":
     m_spa = args.arch_sparse_feature_size
     num_fea = ln_emb.size + 1  # num sparse + num dense features
     m_den_out = ln_bot[ln_bot.size - 1]
+
+    if args.arch_without_mlp_bot:
+        num_fea = ln_emb.size
+        lX = [None for _ in range(len(lX))]
+        ln_bot = np.zeros(1, dtype=np.int)
+        m_den_out = 0
+
     if args.arch_interaction_op == "dot":
         # approach 1: all
         # num_int = num_fea * num_fea + m_den_out
@@ -547,7 +559,7 @@ if __name__ == "__main__":
         else:
             num_int = (num_fea * (num_fea - 1)) // 2 + m_den_out
     elif args.arch_interaction_op == "cat":
-        num_int = num_fea * m_den_out
+        num_int = num_fea * m_spa
     else:
         sys.exit(
             "ERROR: --arch-interaction-op="
@@ -557,14 +569,14 @@ if __name__ == "__main__":
     arch_mlp_top_adjusted = str(num_int) + "-" + args.arch_mlp_top
     ln_top = np.fromstring(arch_mlp_top_adjusted, dtype=int, sep="-")
     # sanity check: feature sizes and mlp dimensions must match
-    if m_den != ln_bot[0]:
+    if m_den != ln_bot[0] and args.arch_without_mlp_bot == False:
         sys.exit(
             "ERROR: arch-dense-feature-size "
             + str(m_den)
             + " does not match first dim of bottom mlp "
             + str(ln_bot[0])
         )
-    if m_spa != m_den_out:
+    if m_spa != m_den_out and args.arch_without_mlp_bot == False:
         sys.exit(
             "ERROR: arch-sparse-feature-size "
             + str(m_spa)
@@ -676,7 +688,7 @@ if __name__ == "__main__":
     def dlrm_wrap(X, lS_o, lS_i, use_gpu, device):
         if use_gpu:  # .cuda()
             return dlrm(
-                X.to(device),
+                None if X is None else X.to(device),
                 [S_o.to(device) for S_o in lS_o],
                 [S_i.to(device) for S_i in lS_i],
             )
