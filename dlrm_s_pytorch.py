@@ -550,6 +550,19 @@ if __name__ == "__main__":
     m_den_out = ln_bot[ln_bot.size - 1]
 
     if args.arch_without_mlp_bot:
+        if args.data_generation == "dataset" and args.data_set == "kaggle":
+            print("Convert kaggle criteo to specific shape...")
+            ln_emb = np.fromstring(args.arch_embedding_size, dtype=int, sep="-")
+            assert(ln_emb.size == 1)
+            import math
+            nbatches_ = len(lX)
+            for i_ in range(nbatches_):
+                catted_ = torch.cat(lS_i[i_]).view(-1, 128)
+                t_catted_ = torch.transpose(catted_, 0, 1)
+                int_x_ = torch.round(torch.pow(lX[i_], math.e)).long()
+                t_catted_ = torch.cat([int_x_, t_catted_], 1)
+                lS_i[i_] = [t_catted_.view(-1)]
+                lS_o[i_] = [lS_o[i_][0] * 39]
         num_fea = ln_emb.size
         lX = [None for _ in range(len(lX))]
         ln_bot = np.zeros(1, dtype=np.int)
