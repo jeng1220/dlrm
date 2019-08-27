@@ -206,6 +206,7 @@ class DLRM_Net(object):
             return new_layer
 
     def create_mlp(self, ln, sigmoid_layer, model, tag):
+        if ln[0] == 0: return [None], [None]
         (tag_layer, tag_in, tag_out) = tag
 
         # build MLP layer by layer
@@ -323,8 +324,9 @@ class DLRM_Net(object):
         if self.arch_interaction_op == "dot":
             # concatenate dense and sparse features
             tag_int_out_info = tag_int_out + "_info"
+            F = ly if x[0] is None else x + ly
             T, T_info = model.net.Concat(
-                x + ly,
+                F,
                 [tag_int_out + "_cat_axis0", tag_int_out_info + "_cat_axis0"],
                 axis=1,
                 add_axis=1,
@@ -338,14 +340,16 @@ class DLRM_Net(object):
             Zflat_all = model.net.Flatten(Z, tag_int_out + "_flatten_all", axis=1)
             Zflat = model.net.BatchGather([Zflat_all, tag_int_out +"_tril_indices"],
                                            tag_int_out + "_flatten")
+            F = [Zflat] if x[0] is None else (x + [Zflat])
             R, R_info = model.net.Concat(
-                x + [Zflat], [tag_int_out, tag_int_out_info], axis=1
+                F, [tag_int_out, tag_int_out_info], axis=1
             )
         elif self.arch_interaction_op == "cat":
             # concatenation features (into a row vector)
             tag_int_out_info = tag_int_out + "_info"
+            F = ly if x[0] is None else x + ly
             R, R_info = model.net.Concat(
-                x + ly, [tag_int_out, tag_int_out_info], axis=1
+                F, [tag_int_out, tag_int_out_info], axis=1
             )
         else:
             sys.exit("ERROR: --arch-interaction-op="
@@ -545,7 +549,8 @@ class DLRM_Net(object):
 
     def create_input(self, X, S_lengths, S_indices, T):
         # feed input data to blobs
-        self.FeedBlobWrapper(self.tdin, X, split=True)
+        if X is not None:
+            self.FeedBlobWrapper(self.tdin, X, split=True)
         # save the blob shapes for latter (only needed if onnx is requested)
         if self.save_onnx:
             self.onnx_tsd[self.tdin] = (onnx.TensorProto.FLOAT, X.shape)
@@ -595,7 +600,8 @@ class DLRM_Net(object):
     def run(self, X, S_lengths, S_indices, T, enable_prof=False):
         # feed input data to blobs
         # dense features
-        self.FeedBlobWrapper(self.tdin, X, split=True)
+        if X is not None:
+            self.FeedBlobWrapper(self.tdin, X, split=True)
         # sparse features
         for i in range(len(self.emb_l)):
             # select device
@@ -694,6 +700,7 @@ class DLRM_Net(object):
                                  [w, tag_one, "", tag_lr], w, reset_grad=True)
         # bottom MLP weight and bias
         for w in self.bot_w:
+            if w is None: break
             # allreduce across devices if needed
             if sync_dense_params and self.ndevices > 1:
                 grad_blobs = [
@@ -778,6 +785,7 @@ if __name__ == "__main__":
     # model related parameters
     parser.add_argument("--arch-sparse-feature-size", type=int, default=2)
     parser.add_argument("--arch-embedding-size", type=str, default="4-3-2")
+    parser.add_argument("--arch-without-mlp-bot", action="store_true", default=False)
     parser.add_argument("--arch-mlp-bot", type=str, default="4-3-2")
     parser.add_argument("--arch-mlp-top", type=str, default="4-2-1")
     parser.add_argument("--arch-interaction-op", type=str, default="dot")
@@ -873,6 +881,43 @@ if __name__ == "__main__":
     m_spa = args.arch_sparse_feature_size
     num_fea = ln_emb.size + 1  # num sparse + num dense features
     m_den_out = ln_bot[ln_bot.size - 1]
+
+    if args.arch_without_mlp_bot:
+        if args.data_generation == "dataset" and args.data_set == "kaggle":
+            print("Convert kaggle criteo to specific shape...")
+            unified_offset_ = [0]
+            for i_ in range(0, len(ln_emb)):
+                unified_offset_.append(unified_offset_[i_] + ln_emb[i_])
+            largest_id_ = unified_offset_.pop()
+            print("max categories id:", largest_id_)
+            unified_offset_ = np.asarray(unified_offset_)
+            ln_emb = np.fromstring(args.arch_embedding_size, dtype=int, sep="-")
+            assert(ln_emb.size == 1)
+            assert(ln_emb[0] >= largest_id_)
+            import math
+            nbatches_ = len(lS_i)
+            batch_size_ = len(lS_i[0][0])
+            for i_ in range(nbatches_):
+                # categories-feature.shape(26, batch_size)
+                catted_ = np.concatenate(lS_i[i_]).reshape(-1, batch_size_)
+                # categories-feature.shape(batch_size, 26)
+                t_catted_ = np.transpose(catted_)
+                # unified categories-feature
+                t_catted_ += unified_offset_
+                # convert int-feature back (de-log)
+                int_x_ = np.round(np.power(lX[i_], math.e)).astype(np.int64)
+                # unified all feature.shape(batch_size, 13+26)
+                t_catted_ = np.concatenate([int_x_, t_catted_], axis=1)
+                # flatten unified-feature
+                lS_i[i_] = [t_catted_.flatten()]
+                # adjust sparse offset for unified-feature
+                # 0, 1, 2, 3... -> 0, 39, 78, 117...
+                lS_l[i_] = [[39 for _ in range(batch_size_)]]
+        num_fea = ln_emb.size
+        lX = [None for _ in range(len(lX))]
+        ln_bot = np.zeros(1, dtype=np.int)
+        m_den_out = 0
+
     if args.arch_interaction_op == "dot":
         # approach 1: all
         # num_int = num_fea * num_fea + m_den_out
@@ -882,17 +927,17 @@ if __name__ == "__main__":
         else:
             num_int = (num_fea * (num_fea - 1)) // 2 + m_den_out
     elif args.arch_interaction_op == "cat":
-        num_int = num_fea * m_den_out
+        num_int = num_fea * m_spa
     else:
         sys.exit("ERROR: --arch-interaction-op="
                  + args.arch_interaction_op + " is not supported")
     arch_mlp_top_adjusted = str(num_int) + "-" + args.arch_mlp_top
     ln_top = np.fromstring(arch_mlp_top_adjusted, dtype=int, sep="-")
     # sanity check: feature sizes and mlp dimensions must match
-    if m_den != ln_bot[0]:
+    if m_den != ln_bot[0] and args.arch_without_mlp_bot == False:
         sys.exit("ERROR: arch-dense-feature-size "
             + str(m_den) + " does not match first dim of bottom mlp " + str(ln_bot[0]))
-    if m_spa != m_den_out:
+    if m_spa != m_den_out and args.arch_without_mlp_bot == False:
         sys.exit("ERROR: arch-sparse-feature-size "
             + str(m_spa) + " does not match last dim of bottom mlp " + str(m_den_out))
     if num_int != ln_top[0]:
@@ -930,7 +975,7 @@ if __name__ == "__main__":
             print(lT[j])
 
     ### construct the neural network specified above ###
-    ndevices = min(ngpus, args.mini_batch_size, num_fea - 1) if use_gpu else -1
+    ndevices = min(ngpus, args.mini_batch_size, num_fea if args.arch_without_mlp_bot else num_fea - 1) if use_gpu else -1
     flag_types_shapes = args.save_onnx or args.save_proto_types_shapes
     flag_forward_ops = not (use_gpu and ndevices > 1)
     with core.DeviceScope(device_opt):
