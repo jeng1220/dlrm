@@ -552,13 +552,22 @@ if __name__ == "__main__":
     if args.arch_without_mlp_bot:
         if args.data_generation == "dataset" and args.data_set == "kaggle":
             print("Convert kaggle criteo to specific shape...")
+            unified_offset_ = [0]
+            for i_ in range(0, len(ln_emb)):
+                unified_offset_.append(unified_offset_[i_] + ln_emb[i_])
+            largest_id_ = unified_offset_.pop()
+            print("max categories id:", largest_id_)
+            unified_offset_ = torch.tensor(unified_offset_)
             ln_emb = np.fromstring(args.arch_embedding_size, dtype=int, sep="-")
             assert(ln_emb.size == 1)
+            assert(ln_emb[0] >= largest_id_)
             import math
             nbatches_ = len(lX)
+            batch_size_ = lX[0].shape[0]
             for i_ in range(nbatches_):
-                catted_ = torch.cat(lS_i[i_]).view(-1, 128)
+                catted_ = torch.cat(lS_i[i_]).view(-1, batch_size_)
                 t_catted_ = torch.transpose(catted_, 0, 1)
+                t_catted_ += unified_offset_
                 int_x_ = torch.round(torch.pow(lX[i_], math.e)).long()
                 t_catted_ = torch.cat([int_x_, t_catted_], 1)
                 lS_i[i_] = [t_catted_.view(-1)]
