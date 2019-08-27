@@ -565,12 +565,20 @@ if __name__ == "__main__":
             nbatches_ = len(lX)
             batch_size_ = lX[0].shape[0]
             for i_ in range(nbatches_):
+                # categories-feature.shape(26, batch_size)
                 catted_ = torch.cat(lS_i[i_]).view(-1, batch_size_)
+                # categories-feature.shape(batch_size, 26)
                 t_catted_ = torch.transpose(catted_, 0, 1)
+                # unified categories-feature
                 t_catted_ += unified_offset_
+                # convert int-feature back (de-log)
                 int_x_ = torch.round(torch.pow(lX[i_], math.e)).long()
+                # unified all feature.shape(batch_size, 13+26)
                 t_catted_ = torch.cat([int_x_, t_catted_], 1)
+                # flatten unified-feature
                 lS_i[i_] = [t_catted_.view(-1)]
+                # adjust sparse offset for unified-feature
+                # 0, 1, 2, 3... -> 0, 39, 78, 117...
                 lS_o[i_] = [lS_o[i_][0] * 39]
         num_fea = ln_emb.size
         lX = [None for _ in range(len(lX))]
